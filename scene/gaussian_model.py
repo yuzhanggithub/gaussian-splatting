@@ -102,6 +102,10 @@ class GaussianModel:
         self.spatial_lr_scale = 0
 
         # 调用setup_functions来初始化一些处理函数
+        #
+        self.voxel_length = 5
+        self.voxel_level = torch.empty(0)
+        self.max_voxel_level = 0
         self.setup_functions()
 
     def capture(self):
@@ -118,6 +122,8 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            #
+            self.voxel_level,
         )
     
     def restore(self, model_args, training_args):
@@ -132,7 +138,9 @@ class GaussianModel:
         xyz_gradient_accum, 
         denom,
         opt_dict, 
-        self.spatial_lr_scale) = model_args
+        self.spatial_lr_scale,
+        #
+        self.voxel_level) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -171,6 +179,16 @@ class GaussianModel:
     @property
     def get_exposure(self):
         return self._exposure
+    
+    #
+    @property
+    def get_voxel_length(self):
+        return self.voxel_length
+    
+    #
+    @property
+    def get_voxel_level(self):
+        return self.voxel_level
 
     def get_exposure_from_name(self, image_name):
         return self._exposure[self.exposure_mapping[image_name]]
