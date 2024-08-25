@@ -20,6 +20,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+import math
 
 class GaussianModel:
 
@@ -55,16 +56,26 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree):
+    def __init__(self, sh_degree, input_max_voxel_length, input_max_voxel_level : int):
         """
         初始化3D高斯模型的参数。
  
         :param sh_degree: 球谐函数的最大次数，用于控制颜色表示的复杂度。
+        :param input_max_voxel_length: the max voxel length
+        :param input_max_voxel_level: the max level of the voxel
         """
+
+        print("Start to init the gaussian model")
+
         # 当前激活的球谐次数，初始为0
         self.active_sh_degree = 0
         # 允许的最大球谐次数
         self.max_sh_degree = sh_degree
+
+        # Set up the voxel related property.
+        self.max_voxel_length = input_max_voxel_length
+        self.max_voxel_level = input_max_voxel_level
+        self.voxel_level = torch.empty(0)
         
         # 3D高斯的中心位置（均值）
         self._xyz = torch.empty(0)
@@ -101,11 +112,18 @@ class GaussianModel:
         self.spatial_lr_scale = 0
 
         # 调用setup_functions来初始化一些处理函数
+
         self.setup_functions()
+
+        print("Finish init the gaussian model")
 
     def capture(self):
         return (
             self.active_sh_degree,
+            # Capture the voxel related property.
+            self.max_voxel_length,
+            self.max_voxel_level,
+            self.voxel_level,
             self._xyz,
             self._features_dc,
             self._features_rest,
@@ -120,7 +138,11 @@ class GaussianModel:
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
+        (self.active_sh_degree,
+        # Load the voxel related property.
+        self.max_voxel_length,
+        self.max_voxel_level,
+        self.voxel_level,
         self._xyz, 
         self._features_dc, 
         self._features_rest,
@@ -174,8 +196,80 @@ class GaussianModel:
     def get_exposure_from_name(self, image_name):
         return self._exposure[self.exposure_mapping[image_name]]
     
+    #??? This is a tensor?
+    # Get voxel_level 
+    @property
+    def get_voxel_level(self):
+        return self.voxel_level
+    
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+
+    def get_voxel_length(self, query_level):
+        """ 
+        Calculate the voxel length for the given query level.
+        """
+        # TODO(yu): remove such check later
+        assert query_level >=0
+        if query_level > self.max_voxel_level:
+            query_level = self.max_voxel_level
+        voxel_length = self.max_voxel_length / (2 ** query_level)
+        return voxel_length
+    
+    def get_voxel_sphere_radius(self, query_level):
+        """ 
+        Calculate the sphere radius at the voxel for the given query level.
+        """
+        # TODO(yu): this may needs fine tunning
+        return 0.5 * self.get_voxel_length(query_level)
+    
+    def get_nearest_voxel_level(self, length):
+        """
+        Find the smallest voxel level where the corresponding voxel length is greater than or equal to the given length.
+        Returned value is capped between 0 and max_voxel_level. 
+        """
+        # TODO(yu): remove such check later
+        assert length >= 0, f"Assert failed, length:{length}"
+        if length >= self.max_voxel_length:
+            return 0
+        
+        ratio = self.max_voxel_length / length
+        voxel_level = min(int(math.floor(math.log2(ratio))), self.max_voxel_level)
+        
+        return voxel_level
+    
+    def get_nearest_voxel_center(self, level, query_translation):
+        """
+        Calculate the nearest voxel center based on the provided voxel level and query translation.
+
+        Parameters:
+        - level (int): The level of the voxel, which determines the size of the voxel.
+        - query_translation (torch.Tensor): The query translation tensor (e.g., xyz coordinates).
+
+        Returns:
+        - torch.Tensor: A tensor representing the coordinates of the nearest voxel center.
+        """
+        voxel_length = self.get_voxel_length(level)
+        nearest_center = torch.round(query_translation / voxel_length) * voxel_length
+        return nearest_center
+
+    # TODO(yu): remove
+    def print_negative_equiv_scalings(self, scaling):
+        new_equiv_volumes = scaling[:, 0] * scaling[:, 1] * scaling[:, 2]
+        new_equiv_scalings = torch.pow(new_equiv_volumes, 1/3.0)
+
+        nan_mask = torch.isnan(new_equiv_scalings)
+
+        # Print the values where NaNs occur
+        if nan_mask.any():
+            print("Indices of NaN values:", torch.nonzero(nan_mask, as_tuple=True))
+            
+            # Print related fields for those indices
+            print("Related new_equiv_volumes values with NaNs:")
+            print(new_equiv_volumes[nan_mask])
+
+            print("Related self._scaling values with NaNs:")
+            print(scaling[nan_mask])
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -188,9 +282,11 @@ class GaussianModel:
         :param pcd: 点云数据，包含点的位置和颜色。
         :param spatial_lr_scale: 空间学习率缩放因子，影响位置参数的学习率。
         """
+        print("Start create from pcd")
+
         self.spatial_lr_scale = spatial_lr_scale
         # 将点云的位置和颜色数据从numpy数组转换为PyTorch张量，并传送到CUDA设备上
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        fused_translation = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         # 初始化存储球谐系数的张量，每个颜色通道有(max_sh_degree + 1) ** 2个球谐系数
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
@@ -198,24 +294,45 @@ class GaussianModel:
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
 
-        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+        print("Number of points at initialisation : ", fused_translation.shape[0])
 
         # distCUDA2 is in sample knn
         # 计算点云中每个点到其最近的k个点的平均距离的平方，用于确定高斯的尺度参数
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        
+        # Set the voxel based scales
+        # scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        dist = torch.sqrt(dist2)
+        nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in dist.cpu().numpy()]
+        voxel_based_scales = torch.tensor([self.get_voxel_sphere_radius(level) for level in nearest_voxel_levels]).cuda()
+        voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)
+
+        # TODO(yu): remove
+        print("create_from_pcd scales:")
+        self.print_negative_equiv_scalings(torch.exp(voxel_based_scales))
+
+        
+
+
+        rots = torch.zeros((fused_translation.shape[0], 4), device="cuda")
         # quaternion store as wxyz
         rots[:, 0] = 1
 
         # 初始化每个点的不透明度为0.1（通过inverse_sigmoid转换）
-        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_translation.shape[0], 1), dtype=torch.float, device="cuda"))
 
+        # Get voxel_based_translation
+        voxel_based_translation = torch.stack(
+            list(map(lambda pair: self.get_nearest_voxel_center(pair[0], pair[1]), 
+                zip(nearest_voxel_levels, fused_translation)))
+        ).cuda()
+        
         # 将以上计算的参数设置为模型的可训练参数
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        # self._xyz = nn.Parameter(fused_translation.requires_grad_(True))
+        self._xyz = nn.Parameter(voxel_based_translation.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._scaling = nn.Parameter(voxel_based_scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
@@ -279,7 +396,8 @@ class GaussianModel:
                 return lr
 
     def construct_list_of_attributes(self):
-        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # TODO(yu) not sure if works
+        l = ['voxel_level', 'x', 'y', 'z', 'nx', 'ny', 'nz']
         # All channels except the 3 DC
         for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
             l.append('f_dc_{}'.format(i))
@@ -295,6 +413,7 @@ class GaussianModel:
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
+        voxel_levels = self.voxel_level.detach().cpu().numpy()
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
@@ -306,7 +425,7 @@ class GaussianModel:
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((voxel_levels, xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -322,6 +441,9 @@ class GaussianModel:
 
     def load_ply(self, path):
         plydata = PlyData.read(path)
+
+        # TODO(yu): not sure if works
+        voxel_level = np.asarray(plydata.elements[0]["voxel_level"])[..., np.newaxis]
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
@@ -474,6 +596,7 @@ class GaussianModel:
         "scaling" : new_scaling,
         "rotation" : new_rotation}
 
+        # TODO(yu): not sure if we should reset all tensors' xyz and scaling?
         #将字典中的张量连接（concatenate）成可优化的张量。这个方法的具体实现可能是将字典中的每个张量进行堆叠，以便于在优化器中进行处理。
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -487,11 +610,24 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        
+
+
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         """
         对那些梯度超过一定阈值且尺度大于一定阈值的3D高斯进行分割操作。
         这意味着这些高斯可能过于庞大，覆盖了过多的空间区域，需要分割成更小的部分以提升细节。
         """
+
+        # TODO(yu): remove
+        self.print_negative_equiv_scalings(torch.exp(self._scaling))
+        
+        # Voxel process after densification
+        exp_scaling = torch.exp(self._scaling)
+        new_equiv_volumes = exp_scaling[:, 0] * exp_scaling[:, 1] * exp_scaling[:, 2]
+        new_equiv_scalings = torch.pow(new_equiv_volumes, 1/3.0)
+
+        new_nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in new_equiv_scalings.cpu().numpy()]
 
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -501,6 +637,9 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        # With voxel restriction
+        voxel_level_mask = torch.tensor(new_nearest_voxel_levels).cuda() < self.max_voxel_level
+        selected_pts_mask = torch.logical_and(selected_pts_mask, voxel_level_mask)                
 
         # 计算新高斯分布的属性
         # 尺度
@@ -555,6 +694,22 @@ class GaussianModel:
         # 将克隆得到的新高斯分布的属性添加到模型中
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
+    def voxelize_translation_and_scaling(self):
+        exp_scaling = torch.exp(self._scaling)
+        equiv_volumes = exp_scaling[:, 0] * exp_scaling[:, 1] * exp_scaling[:, 2]
+        equiv_scalings = torch.pow(equiv_volumes, 1/3.0)
+        nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in equiv_scalings.cpu().numpy()]
+        voxel_based_scales = torch.tensor([self.get_voxel_sphere_radius(level) for level in nearest_voxel_levels]).cuda()
+        voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)
+
+        voxel_based_translation = torch.stack(
+            list(map(lambda pair: self.get_nearest_voxel_center(pair[0], pair[1]), 
+                zip(nearest_voxel_levels, self._xyz)))
+        ).cuda()
+
+        self._xyz = nn.Parameter(voxel_based_translation.requires_grad_(True))
+        self._scaling = nn.Parameter(voxel_based_scales.requires_grad_(True))
+
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         """
         对3D高斯分布进行密集化和修剪的操作
@@ -583,6 +738,8 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
+
+        self.voxelize_translation_and_scaling()
 
         torch.cuda.empty_cache()
 

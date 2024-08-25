@@ -47,6 +47,9 @@ class ParamGroup:
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
+        # TODO(yu): give some default numbers now
+        self.voxel_length = 1
+        self.voxel_level = 11
         self._source_path = ""
         self._model_path = ""
         self._images = "images"

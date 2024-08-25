@@ -15,6 +15,9 @@ import numpy as np
 from typing import NamedTuple
 
 class BasicPointCloud(NamedTuple):
+    """
+    Point cloud stores the points, colors and normals as np.array.
+    """
     points : np.array
     colors : np.array
     normals : np.array

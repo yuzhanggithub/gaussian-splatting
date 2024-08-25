@@ -33,7 +33,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
 
     # 初始化高斯模型，用于表示场景中的每个点的3D高斯分布
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, dataset.voxel_length, dataset.voxel_level)
 
     # 初始化场景对象，加载数据集和对应的相机参数
     scene = Scene(dataset, gaussians)
