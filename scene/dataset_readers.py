@@ -68,27 +68,36 @@ def getNerfppNorm(cam_info):
     return {"translate": translate, "radius": radius}
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, depths_folder, test_cam_names_list):
+    # 初始化用于存储相机信息的列表
     cam_infos = []
+
+    # 遍历所有相机的外参
     for idx, key in enumerate(cam_extrinsics):
+        # 动态显示读取相机信息的进度
         sys.stdout.write('\r')
         # the exact output you're looking for:
         sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
         sys.stdout.flush()
 
+        # 获取当前相机的外参和内参
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
         height = intr.height
         width = intr.width
 
+        # 相机的唯一标识符
         uid = intr.id
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
 
+        # 根据相机内参模型计算视场角（FoV）
         if intr.model=="SIMPLE_PINHOLE":
+            # 如果是简单针孔模型，只有一个焦距参数
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
             FovX = focal2fov(focal_length_x, width)
         elif intr.model=="PINHOLE":
+            # 如果是针孔模型，有两个焦距参数
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
@@ -104,10 +113,12 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             except:
                 print("\n", key, "not found in depths_params")
 
+        # 构建图片的完整路径
         image_path = os.path.join(images_folder, extr.name)
         image_name = extr.name
         depth_path = os.path.join(depths_folder, f"{extr.name[:-n_remove]}.png") if depths_folder != "" else ""
 
+        # 创建并存储相机信息
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=depth_params,
                               image_path=image_path, image_name=image_name, depth_path=depth_path,
                               width=width, height=height, is_test=image_name in test_cam_names_list)
@@ -142,6 +153,9 @@ def storePly(path, xyz, rgb):
     ply_data.write(path)
 
 def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
+    """
+    尝试读取COLMAP处理结果中的二进制相机外参和内参文件
+    """
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -175,6 +189,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
             print(f"An unexpected error occurred when trying to open depth_params.json file: {e}")
             sys.exit(1)
 
+    # 根据是否为评估模式（eval），将相机分为训练集和测试集
+    # 如果为评估模式，根据llffhold参数（通常用于LLFF数据集）间隔选择测试相机
     if eval:
         if "360" in path:
             llffhold = 8
@@ -189,18 +205,23 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     else:
         test_cam_names_list = []
 
+    # 定义存放图片的目录，如果未指定则默认为"images"
     reading_dir = "images" if images == None else images
+    # 读取并处理相机参数，转换为内部使用的格式
     cam_infos_unsorted = readColmapCameras(
         cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
         images_folder=os.path.join(path, reading_dir), 
         depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list)
+    # 根据图片名称对相机信息进行排序，以保证顺序一致性
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
     test_cam_infos = [c for c in cam_infos if c.is_test]
 
+    # 计算场景归一化参数，这是为了处理不同尺寸和位置的场景，使模型训练更稳定
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
+    # 尝试读取点云数据，优先从PLY文件读取，如果不存在，则尝试从BIN或TXT文件转换并保存为PLY格式
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
@@ -216,6 +237,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     except:
         pcd = None
 
+    # 组装场景信息，包括点云、训练用相机、测试用相机、场景归一化参数和点云文件路径
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
