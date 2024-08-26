@@ -42,12 +42,25 @@ def get_expon_lr_func(
     :param conf: config subtree 'lr' or similar
     :param max_steps: int, the number of steps during optimization.
     :return HoF which takes step as input
+
+    创建一个学习率调度函数，该函数根据训练进度动态调整学习率
+ 
+    :param lr_init: 初始学习率。
+    :param lr_final: 最终学习率。
+    :param lr_delay_steps: 学习率延迟步数，在这些步数内学习率将被降低。
+    :param lr_delay_mult: 学习率延迟乘数，用于计算初始延迟学习率。
+    :param max_steps: 最大步数，用于规范化训练进度。
+    :return: 一个函数，根据当前步数返回调整后的学习率。
+
     """
 
     def helper(step):
+        # 如果步数小于0或学习率为0，直接返回0，表示不进行优化
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
             # Disable this parameter
             return 0.0
+        #??? what is delay_steps
+        # 如果设置了学习率延迟步数，计算延迟调整后的学习率
         if lr_delay_steps > 0:
             # A kind of reverse cosine decay.
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
@@ -55,6 +68,7 @@ def get_expon_lr_func(
             )
         else:
             delay_rate = 1.0
+        # 根据步数计算学习率的对数线性插值，实现从初始学习率到最终学习率的平滑过渡
         t = np.clip(step / max_steps, 0, 1)
         log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
         return delay_rate * log_lerp
@@ -62,6 +76,12 @@ def get_expon_lr_func(
     return helper
 
 def strip_lowerdiag(L):
+    """
+    从协方差矩阵中提取六个独立参数。
+ 
+    :param L: 协方差矩阵。
+    :return: 六个独立参数组成的张量。
+    """
     uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
 
     uncertainty[:, 0] = L[:, 0, 0]
@@ -73,9 +93,18 @@ def strip_lowerdiag(L):
     return uncertainty
 
 def strip_symmetric(sym):
+    """
+    提取协方差矩阵的对称部分。
+ 
+    :param sym: 协方差矩阵。
+    :return: 对称部分。
+    """
     return strip_lowerdiag(sym)
 
 def build_rotation(r):
+    """
+    根据旋转四元数构建旋转矩阵。
+    """
     norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
 
     q = r / norm[:, None]
@@ -99,9 +128,17 @@ def build_rotation(r):
     return R
 
 def build_scaling_rotation(s, r):
+    """
+    构建3D高斯模型的尺度-旋转矩阵。
+ 
+    :param s: 尺度参数。
+    :param r: 旋转参数。
+    :return: 尺度-旋转矩阵。
+    """
     L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
     R = build_rotation(r)
 
+    # 设置尺度矩阵的对角线元素
     L[:,0,0] = s[:,0]
     L[:,1,1] = s[:,1]
     L[:,2,2] = s[:,2]
