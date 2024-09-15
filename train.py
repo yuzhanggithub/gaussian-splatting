@@ -157,6 +157,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # 在指定迭代区间内，对3D高斯模型进行增密和修剪
             # Densification
+            voxel_it = False
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -165,6 +166,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                    voxel_it = True
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
@@ -176,6 +178,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+                if voxel_it:
+                    gaussians.voxelize_translation_and_scaling()
 
             # 定期保存checkpoint
             if (iteration in checkpoint_iterations):

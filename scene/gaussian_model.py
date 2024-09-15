@@ -335,7 +335,9 @@ class GaussianModel:
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(voxel_based_scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        # Disable roation to be learnable
+        # self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._rotation = rots.clone().detach()
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
@@ -706,15 +708,16 @@ class GaussianModel:
         nearest_voxel_levels = self.get_nearest_voxel_level(2 * equiv_scalings)
 
         # Calculate voxel-based scales using tensor operations
-        voxel_based_scales = self.get_voxel_sphere_radius(nearest_voxel_levels)  # Remove list comprehension, handle all at once
+        voxel_based_scales = self.get_voxel_sphere_radius(nearest_voxel_levels)  # Batch processing
         voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)  # Repeat to match the shape (Nx3)
 
-        # Calculate voxel-based translations using map with PyTorch
-        voxel_based_translation = self.get_nearest_voxel_center(nearest_voxel_levels, self._xyz)  # Batch-wise operation
+        # Calculate voxel-based translations using batch-wise operation
+        voxel_based_translation = self.get_nearest_voxel_center(nearest_voxel_levels, self._xyz)
 
-        # Update _xyz and _scaling as non-learnable parameters with requires_grad_(True)
-        self._xyz = nn.Parameter(voxel_based_translation.requires_grad_(True))
-        self._scaling = nn.Parameter(voxel_based_scales.requires_grad_(True))
+        # Update the values of _xyz and _scaling in-place without resetting gradients
+        self._xyz.data.copy_(voxel_based_translation)
+        self._scaling.data.copy_(voxel_based_scales)
+
 
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
@@ -746,7 +749,7 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
-        self.voxelize_translation_and_scaling()
+        # self.voxelize_translation_and_scaling()
 
         torch.cuda.empty_cache()
 
