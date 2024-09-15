@@ -31,6 +31,9 @@ class GaussianModel:
 
         # 定义构建3D高斯协方差矩阵的函数
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
+            """
+            scaling here is 3d
+            """
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
             # 计算实际的协方差矩阵
             actual_covariance = L @ L.transpose(1, 2)
@@ -203,7 +206,7 @@ class GaussianModel:
         return self.voxel_level
     
     def get_covariance(self, scaling_modifier = 1):
-        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+        return self.covariance_activation(self.get_scaling.repeat(1, 3), scaling_modifier, self._rotation)
 
 
     def get_voxel_length(self, query_level):
@@ -248,6 +251,11 @@ class GaussianModel:
         # Get the voxel length for each level and reshape for broadcasting with the 3D coordinates
         voxel_length = self.get_voxel_length(level)  # Shape: (N,)
         voxel_length = voxel_length[:, None]  # Reshape to (N, 1) for broadcasting
+
+        print("level shape:", level.shape)
+        print("query_translation shape:", query_translation.shape)
+        print("voxel_length shape:", voxel_length.shape)
+
 
         # Perform element-wise division and rounding to get the nearest center, then scale back
         nearest_center = torch.round(query_translation / voxel_length) * voxel_length
@@ -309,11 +317,11 @@ class GaussianModel:
         nearest_voxel_levels = self.get_nearest_voxel_level(2 * dist)
         # nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in dist.cpu().numpy()]
         voxel_based_scales = torch.tensor([self.get_voxel_sphere_radius(level) for level in nearest_voxel_levels]).cuda()
-        voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)
+        voxel_based_scales = torch.log(voxel_based_scales)[..., None]
 
         # TODO(yu): remove
         print("create_from_pcd scales:")
-        self.print_negative_equiv_scalings(torch.exp(voxel_based_scales))
+        # self.print_negative_equiv_scalings(torch.exp(voxel_based_scales))
 
         
 
@@ -444,6 +452,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
 
     def load_ply(self, path):
+        print("Function load_ply called")
+
         plydata = PlyData.read(path)
 
         # TODO(yu): not sure if works
@@ -624,14 +634,14 @@ class GaussianModel:
         """
 
         # TODO(yu): remove
-        self.print_negative_equiv_scalings(torch.exp(self._scaling))
+        # self.print_negative_equiv_scalings(torch.exp(self._scaling))
         
         # Voxel process after densification
         exp_scaling = torch.exp(self._scaling)
-        new_equiv_volumes = exp_scaling[:, 0] * exp_scaling[:, 1] * exp_scaling[:, 2]
-        new_equiv_scalings = torch.pow(new_equiv_volumes, 1/3.0)
+        exp_scaling = exp_scaling.squeeze(1)  # Shape becomes [135041]
 
-        new_nearest_voxel_levels = self.get_nearest_voxel_level(2 * new_equiv_scalings)
+
+        new_nearest_voxel_levels = self.get_nearest_voxel_level(2 * exp_scaling)
 
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -640,10 +650,25 @@ class GaussianModel:
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+                                              self.get_scaling.squeeze(1) > self.percent_dense * scene_extent)
+        
+        print("execute here1")
         # With voxel restriction
         voxel_level_mask = torch.tensor(new_nearest_voxel_levels).cuda() < self.max_voxel_level
-        selected_pts_mask = torch.logical_and(selected_pts_mask, voxel_level_mask)                
+        # voxel_level_mask = voxel_level_mask.squeeze(1)
+        print("size",voxel_level_mask.shape, selected_pts_mask.shape, grads.shape, self.get_scaling.shape)
+
+        print(f"selected_pts_mask: {selected_pts_mask.shape}, dtype: {selected_pts_mask.dtype}")
+        print(f"voxel_level_mask: {voxel_level_mask.shape}, dtype: {voxel_level_mask.dtype}")
+        print(f"grads: {grads.shape}, dtype: {grads.dtype}")
+        print(f"self.get_scaling: {self.get_scaling.shape}, dtype: {self.get_scaling.dtype}")
+        print(f"exp_scaling: {exp_scaling.shape}, dtype: {exp_scaling.dtype}")
+
+        torch.cuda.empty_cache()
+        print("execute here2")
+
+        selected_pts_mask = torch.logical_and(selected_pts_mask, voxel_level_mask) 
+        print("execute here3")               
 
         # 计算新高斯分布的属性
         # 尺度
@@ -700,16 +725,16 @@ class GaussianModel:
 
     def voxelize_translation_and_scaling(self):
         exp_scaling = torch.exp(self._scaling)
-        # Compute equivalent volumes and scaling
-        equiv_volumes = exp_scaling[:, 0] * exp_scaling[:, 1] * exp_scaling[:, 2]
-        equiv_scalings = torch.pow(equiv_volumes, 1/3.0)
+        exp_scaling = exp_scaling.squeeze(1)  # Shape becomes [135041]
+
 
         # Use PyTorch for batch processing
-        nearest_voxel_levels = self.get_nearest_voxel_level(2 * equiv_scalings)
+        nearest_voxel_levels = self.get_nearest_voxel_level(2 * exp_scaling)
 
         # Calculate voxel-based scales using tensor operations
         voxel_based_scales = self.get_voxel_sphere_radius(nearest_voxel_levels)  # Batch processing
-        voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)  # Repeat to match the shape (Nx3)
+        # No need to repeat(1, 3)
+        voxel_based_scales = torch.log(voxel_based_scales)[..., None]
 
         # Calculate voxel-based translations using batch-wise operation
         voxel_based_translation = self.get_nearest_voxel_center(nearest_voxel_levels, self._xyz)
