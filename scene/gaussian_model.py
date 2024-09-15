@@ -205,53 +205,55 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
+
     def get_voxel_length(self, query_level):
         """ 
         Calculate the voxel length for the given query level.
         """
-        # TODO(yu): remove such check later
-        assert query_level >=0
-        if query_level > self.max_voxel_level:
-            query_level = self.max_voxel_level
+        # Ensure the query level is a tensor for batch operations
+        query_level = torch.clamp(query_level, 0, self.max_voxel_level)
         voxel_length = self.max_voxel_length / (2 ** query_level)
         return voxel_length
-    
+
     def get_voxel_sphere_radius(self, query_level):
         """ 
         Calculate the sphere radius at the voxel for the given query level.
         """
-        # TODO(yu): this may needs fine tunning
         return 0.5 * self.get_voxel_length(query_level)
-    
+
     def get_nearest_voxel_level(self, length):
         """
         Find the smallest voxel level where the corresponding voxel length is greater than or equal to the given length.
-        Returned value is capped between 0 and max_voxel_level. 
         """
-        # TODO(yu): remove such check later
-        assert length >= 0, f"Assert failed, length:{length}"
-        if length >= self.max_voxel_length:
-            return 0
+        assert torch.all(length >= 0), f"Assert failed, length:{length}"
+        
+        length = torch.clamp(length, max=self.max_voxel_length)
         
         ratio = self.max_voxel_length / length
-        voxel_level = min(int(math.floor(math.log2(ratio))), self.max_voxel_level)
+        voxel_level = torch.floor(torch.log2(ratio))
         
-        return voxel_level
-    
+        return torch.clamp(voxel_level.int(), 0, self.max_voxel_level)
+
     def get_nearest_voxel_center(self, level, query_translation):
         """
         Calculate the nearest voxel center based on the provided voxel level and query translation.
 
         Parameters:
-        - level (int): The level of the voxel, which determines the size of the voxel.
-        - query_translation (torch.Tensor): The query translation tensor (e.g., xyz coordinates).
+        - level (torch.Tensor): A 1D tensor representing the voxel levels for each query.
+        - query_translation (torch.Tensor): A 2D tensor representing the query translation (e.g., xyz coordinates).
 
         Returns:
-        - torch.Tensor: A tensor representing the coordinates of the nearest voxel center.
+        - torch.Tensor: A 2D tensor representing the coordinates of the nearest voxel center.
         """
-        voxel_length = self.get_voxel_length(level)
+        # Get the voxel length for each level and reshape for broadcasting with the 3D coordinates
+        voxel_length = self.get_voxel_length(level)  # Shape: (N,)
+        voxel_length = voxel_length[:, None]  # Reshape to (N, 1) for broadcasting
+
+        # Perform element-wise division and rounding to get the nearest center, then scale back
         nearest_center = torch.round(query_translation / voxel_length) * voxel_length
+
         return nearest_center
+
 
     # TODO(yu): remove
     def print_negative_equiv_scalings(self, scaling):
@@ -303,7 +305,9 @@ class GaussianModel:
         # Set the voxel based scales
         # scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
         dist = torch.sqrt(dist2)
-        nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in dist.cpu().numpy()]
+        
+        nearest_voxel_levels = self.get_nearest_voxel_level(2 * dist)
+        # nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in dist.cpu().numpy()]
         voxel_based_scales = torch.tensor([self.get_voxel_sphere_radius(level) for level in nearest_voxel_levels]).cuda()
         voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)
 
@@ -322,10 +326,8 @@ class GaussianModel:
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_translation.shape[0], 1), dtype=torch.float, device="cuda"))
 
         # Get voxel_based_translation
-        voxel_based_translation = torch.stack(
-            list(map(lambda pair: self.get_nearest_voxel_center(pair[0], pair[1]), 
-                zip(nearest_voxel_levels, fused_translation)))
-        ).cuda()
+        voxel_based_translation = self.get_nearest_voxel_center(nearest_voxel_levels, fused_translation)
+
         
         # 将以上计算的参数设置为模型的可训练参数
         # self._xyz = nn.Parameter(fused_translation.requires_grad_(True))
@@ -627,7 +629,7 @@ class GaussianModel:
         new_equiv_volumes = exp_scaling[:, 0] * exp_scaling[:, 1] * exp_scaling[:, 2]
         new_equiv_scalings = torch.pow(new_equiv_volumes, 1/3.0)
 
-        new_nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in new_equiv_scalings.cpu().numpy()]
+        new_nearest_voxel_levels = self.get_nearest_voxel_level(2 * new_equiv_scalings)
 
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -696,19 +698,24 @@ class GaussianModel:
 
     def voxelize_translation_and_scaling(self):
         exp_scaling = torch.exp(self._scaling)
+        # Compute equivalent volumes and scaling
         equiv_volumes = exp_scaling[:, 0] * exp_scaling[:, 1] * exp_scaling[:, 2]
         equiv_scalings = torch.pow(equiv_volumes, 1/3.0)
-        nearest_voxel_levels = [self.get_nearest_voxel_level(2 * original_dist) for original_dist in equiv_scalings.cpu().numpy()]
-        voxel_based_scales = torch.tensor([self.get_voxel_sphere_radius(level) for level in nearest_voxel_levels]).cuda()
-        voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)
 
-        voxel_based_translation = torch.stack(
-            list(map(lambda pair: self.get_nearest_voxel_center(pair[0], pair[1]), 
-                zip(nearest_voxel_levels, self._xyz)))
-        ).cuda()
+        # Use PyTorch for batch processing
+        nearest_voxel_levels = self.get_nearest_voxel_level(2 * equiv_scalings)
 
+        # Calculate voxel-based scales using tensor operations
+        voxel_based_scales = self.get_voxel_sphere_radius(nearest_voxel_levels)  # Remove list comprehension, handle all at once
+        voxel_based_scales = torch.log(voxel_based_scales)[..., None].repeat(1, 3)  # Repeat to match the shape (Nx3)
+
+        # Calculate voxel-based translations using map with PyTorch
+        voxel_based_translation = self.get_nearest_voxel_center(nearest_voxel_levels, self._xyz)  # Batch-wise operation
+
+        # Update _xyz and _scaling as non-learnable parameters with requires_grad_(True)
         self._xyz = nn.Parameter(voxel_based_translation.requires_grad_(True))
         self._scaling = nn.Parameter(voxel_based_scales.requires_grad_(True))
+
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         """
