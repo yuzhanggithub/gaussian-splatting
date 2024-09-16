@@ -115,7 +115,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = ssim(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        loss_translation, loss_scaling = gaussians.loss_voxelize_translation_and_scaling()
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value) + 0.2 * loss_translation + 0.2 * loss_scaling
+        if iteration % opt.densification_interval == 0:
+            print("loss is consisted of: ", Ll1, 1.0 - ssim_value, loss_translation, loss_scaling)
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -178,8 +181,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
-                if voxel_it:
-                    gaussians.voxelize_translation_and_scaling()
+                # if voxel_it:
+                #     gaussians.voxelize_translation_and_scaling()
 
             # 定期保存checkpoint
             if (iteration in checkpoint_iterations):

@@ -233,7 +233,7 @@ class GaussianModel:
         length = torch.clamp(length, max=self.max_voxel_length)
         
         ratio = self.max_voxel_length / length
-        voxel_level = torch.floor(torch.log2(ratio))
+        voxel_level = torch.round(torch.log2(ratio))
         
         return torch.clamp(voxel_level.int(), 0, self.max_voxel_level)
 
@@ -252,9 +252,9 @@ class GaussianModel:
         voxel_length = self.get_voxel_length(level)  # Shape: (N,)
         voxel_length = voxel_length[:, None]  # Reshape to (N, 1) for broadcasting
 
-        print("level shape:", level.shape)
-        print("query_translation shape:", query_translation.shape)
-        print("voxel_length shape:", voxel_length.shape)
+        # print("level shape:", level.shape)
+        # print("query_translation shape:", query_translation.shape)
+        # print("voxel_length shape:", voxel_length.shape)
 
 
         # Perform element-wise division and rounding to get the nearest center, then scale back
@@ -652,23 +652,23 @@ class GaussianModel:
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               self.get_scaling.squeeze(1) > self.percent_dense * scene_extent)
         
-        print("execute here1")
+        # print("execute here1")
         # With voxel restriction
         voxel_level_mask = torch.tensor(new_nearest_voxel_levels).cuda() < self.max_voxel_level
         # voxel_level_mask = voxel_level_mask.squeeze(1)
-        print("size",voxel_level_mask.shape, selected_pts_mask.shape, grads.shape, self.get_scaling.shape)
+        # print("size",voxel_level_mask.shape, selected_pts_mask.shape, grads.shape, self.get_scaling.shape)
 
-        print(f"selected_pts_mask: {selected_pts_mask.shape}, dtype: {selected_pts_mask.dtype}")
-        print(f"voxel_level_mask: {voxel_level_mask.shape}, dtype: {voxel_level_mask.dtype}")
-        print(f"grads: {grads.shape}, dtype: {grads.dtype}")
-        print(f"self.get_scaling: {self.get_scaling.shape}, dtype: {self.get_scaling.dtype}")
-        print(f"exp_scaling: {exp_scaling.shape}, dtype: {exp_scaling.dtype}")
+        # print(f"selected_pts_mask: {selected_pts_mask.shape}, dtype: {selected_pts_mask.dtype}")
+        # print(f"voxel_level_mask: {voxel_level_mask.shape}, dtype: {voxel_level_mask.dtype}")
+        # print(f"grads: {grads.shape}, dtype: {grads.dtype}")
+        # print(f"self.get_scaling: {self.get_scaling.shape}, dtype: {self.get_scaling.dtype}")
+        # print(f"exp_scaling: {exp_scaling.shape}, dtype: {exp_scaling.dtype}")
 
         torch.cuda.empty_cache()
-        print("execute here2")
+        # print("execute here2")
 
         selected_pts_mask = torch.logical_and(selected_pts_mask, voxel_level_mask) 
-        print("execute here3")               
+        # print("execute here3")               
 
         # 计算新高斯分布的属性
         # 尺度
@@ -742,6 +742,35 @@ class GaussianModel:
         # Update the values of _xyz and _scaling in-place without resetting gradients
         self._xyz.data.copy_(voxel_based_translation)
         self._scaling.data.copy_(voxel_based_scales)
+
+    def loss_voxelize_translation_and_scaling(self):
+        exp_scaling = torch.exp(self._scaling)
+        exp_scaling = exp_scaling.squeeze(1)  # Shape becomes [135041]
+
+        # Use PyTorch for batch processing
+        nearest_voxel_levels = self.get_nearest_voxel_level(2 * exp_scaling)
+
+        # Get voxel-based scales and translations
+        voxel_based_scales = self.get_voxel_sphere_radius(nearest_voxel_levels)  # Batch processing
+        voxel_based_translation = self.get_nearest_voxel_center(nearest_voxel_levels, self._xyz)
+        voxel_lengths = self.get_voxel_length(nearest_voxel_levels)
+        
+        # 1) Translation Loss
+        # Calculate the distance between the original xyz and nearest voxel center
+        translation_diff = self._xyz - voxel_based_translation
+        translation_loss = torch.norm(translation_diff, dim=-1) / voxel_lengths
+
+        # 2) Scaling Loss
+        # Calculate the difference between the original scaling and the voxel-based scaling (radius)
+        scaling_diff = torch.abs(exp_scaling - voxel_based_scales)
+        scaling_loss = scaling_diff / voxel_based_scales
+
+        # Average the losses
+        loss_voxelize_translation = translation_loss.mean()
+        loss_voxelize_scaling = scaling_loss.mean()
+
+        return loss_voxelize_translation, loss_voxelize_scaling
+
 
 
 
