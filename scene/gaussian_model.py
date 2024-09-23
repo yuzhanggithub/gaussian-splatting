@@ -224,7 +224,7 @@ class GaussianModel:
         """
         return 0.5 * self.get_voxel_length(query_level)
 
-    def get_nearest_voxel_level(self, length):
+    def get_nearest_voxel_level(self, length, without_clamp=False):
         """
         Find the smallest voxel level where the corresponding voxel length is greater than or equal to the given length.
         """
@@ -234,8 +234,22 @@ class GaussianModel:
         
         ratio = self.max_voxel_length / length
         voxel_level = torch.round(torch.log2(ratio))
+
+        if without_clamp:
+            return voxel_level.int()
+        else:
+            return torch.clamp(voxel_level.int(), 0, self.max_voxel_level)
+
+    def get_nearest_voxel_index(self, level, query_translation):
         
-        return torch.clamp(voxel_level.int(), 0, self.max_voxel_level)
+        # Get the voxel length for each level and reshape for broadcasting with the 3D coordinates
+        voxel_length = self.get_voxel_length(level)  # Shape: (N,)
+        voxel_length = voxel_length[:, None]  # Reshape to (N, 1) for broadcasting
+
+        nearest_index = torch.round(query_translation / voxel_length)
+
+        return nearest_index
+
 
     def get_nearest_voxel_center(self, level, query_translation):
         """
@@ -796,6 +810,39 @@ class GaussianModel:
 
         # 根据梯度和尺寸阈值进行克隆或分割操作
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+
+        # Try delete very small gaussians?
+        exp_scaling = torch.exp(self._scaling)
+        exp_scaling = exp_scaling.squeeze(1)  # Shape becomes [135041]
+        nearest_voxel_levels = self.get_nearest_voxel_level(2 * exp_scaling, without_clamp=True)
+        high_voxel_levels = nearest_voxel_levels > self.max_voxel_level
+        prune_mask = torch.logical_or(prune_mask, high_voxel_levels)
+
+        # Try remove duplicate voxels
+        nearest_voxel_index = self.get_nearest_voxel_index(nearest_voxel_levels, self._xyz)
+
+        if torch.is_floating_point(nearest_voxel_levels):
+            nearest_voxel_levels_int = torch.round(nearest_voxel_levels).to(torch.int)
+        else:
+            nearest_voxel_levels_int = nearest_voxel_levels.to(torch.int)  # If it's already int, just convert
+
+        # Do the same for nearest_voxel_index if necessary
+        if torch.is_floating_point(nearest_voxel_index):
+            nearest_voxel_index_int = torch.round(nearest_voxel_index).to(torch.int)
+        else:
+            nearest_voxel_index_int = nearest_voxel_index.to(torch.int)
+            
+        combined_voxel_data = torch.cat([nearest_voxel_levels_int.unsqueeze(1), nearest_voxel_index_int], dim=1)
+
+        unique_voxels, inverse_indices = torch.unique(combined_voxel_data, dim=0, return_inverse=True)
+
+        occurrences = torch.bincount(inverse_indices)
+
+        duplicate_voxel_mask = occurrences[inverse_indices] > 1
+
+        prune_mask = torch.logical_or(prune_mask, duplicate_voxel_mask)
+
+
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             #???why 0.1 extent
