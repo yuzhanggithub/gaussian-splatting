@@ -135,9 +135,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         # Backward triggered here.
+            
         loss.backward()
 
         iter_end.record()
+
+        sys.exit("Debug exit")
 
         with torch.no_grad():
             # 更新进度条和损失显示
