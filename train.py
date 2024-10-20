@@ -9,6 +9,9 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import logging
+logging.basicConfig(level=logging.DEBUG)  # Reconfigure logging
+
 import os
 import torch
 from random import randint
@@ -135,12 +138,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         # Backward triggered here.
-            
+        # logging.debug(f"loss, {loss.size()}: {loss}")
+        # gaussians.print_scaling()
+
         loss.backward()
+        
 
         iter_end.record()
-
-        sys.exit("Debug exit")
 
         with torch.no_grad():
             # 更新进度条和损失显示
