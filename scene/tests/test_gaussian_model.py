@@ -118,6 +118,32 @@ def test_get_nearest_voxel_center():
         msg="Voxel translations do not match expected results."
     )
 
+def test_get_relative_position_index_hash():
+    gaussians = GaussianModel(sh_degree=3, input_max_voxel_length=2, input_max_voxel_level=3)
+    
+    query_translations = torch.tensor([
+        [2.8, 2.8, 2.8]
+    ], dtype=torch.float32, device='cuda')
+
+    query_levels = torch.tensor([
+        3
+    ], dtype=torch.float32, device='cuda')
+    
+    expected_results = torch.tensor([
+        0
+    ], dtype=torch.float32, device='cuda')
+    
+    relative_position_index_hash = gaussians.get_relative_position_index_hash(query_levels, query_translations)
+    
+    torch.testing.assert_close(
+        relative_position_index_hash,
+        expected_results,
+        rtol=1e-5,      # Relative tolerance
+        atol=1e-6,      # Absolute tolerance
+        equal_nan=True, # Whether to compare NaNs as equal
+        msg=f"relative_position_index_hash do not match expected values.\nActual: {relative_position_index_hash}\nExpected: {expected_results}"
+    )
+
 def test_get_relative_position_index_hash_batch():
     gaussians = GaussianModel(sh_degree=3, input_max_voxel_length=2, input_max_voxel_level=3)
     
